@@ -166,25 +166,36 @@ int main(int argc, char **argv)
 void eval(char *cmdline) 
 {
     char *argv[MAXARGS];
-    int bg;
-    char buf[MAXLINE];
-    pid_t pid;
-    strcpy(buf, cmdline);
-    bg = parseline(buf, argv);
-
-    if(argv[0] == NULL){
-        return;
-    }
-
-    if(!builtin_cmd(argv)){
-        //forking and execing a child process
-        if((pid = fork()) == 0){
-            if(execv(argv[0], argv) < 0){
-                printf("Command not found!\n");
-                exit(0);
-            }
+ 
+    int bg;         
+    pid_t pid;      
+    sigset_t mask;
+    
+    
+    bg = parseline(cmdline, argv);
+    
+    if(!builtin_cmd(argv)) { 
+        
+        // эхлээд block-лоно
+        sigemptyset(&mask);
+        sigaddset(&mask, SIGCHLD);
+        sigprocmask(SIG_BLOCK, &mask, NULL);
+        // forking
+        if((pid = fork()) < 0){
+            unix_error("forking error");
         }
-        else{
+        // child
+        else if(pid == 0) {
+            sigprocmask(SIG_UNBLOCK, &mask, NULL);
+            setpgid(0, 0);
+            
+            if(execvp(argv[0], argv) < 0) {
+                printf("%s: Command not found\n", argv[0]);
+                exit(1);
+            }
+        } 
+        // parent эхэлж job нэмнэ.
+        else {
             if(!bg){
                 addjob(jobs, pid, FG, cmdline);
             }
@@ -192,17 +203,18 @@ void eval(char *cmdline)
                 addjob(jobs, pid, BG, cmdline);
             }
             sigprocmask(SIG_UNBLOCK, &mask, NULL);
-            if(!bg){
-                waitfg(pid);
-            }
-            else {
-                    printf("[%d] (%d) %s", pid2jid(pid), pid, cmdline);
-                }
-        }
-        //addjob(jobs, pid, bg?BG:FG, cmdline);
+            
         
+            if (!bg){
+                //wait for fg
+                waitfg(pid);
+            } 
+            else {
+                //print for bg
+                printf("[%d] (%d) %s", pid2jid(pid), pid, cmdline);
+            }
+        }
     }
-    return;
 }
 
 /* 
@@ -217,15 +229,15 @@ int parseline(const char *cmdline, char **argv)
     static char array[MAXLINE]; /* command line-ы copy-г барьж авах */
     char *buf = array;          /* command line-ыг дайрч өнгөрөх ptr */
     char *delim;                /* Эхний зай хязгаарлагчийг заана.*/
-    int argc;                   /* number of args */
+    int argc;                   /* аргументийн тоо */
     int bg;                     /* background job? */
 
     strcpy(buf, cmdline);
-    buf[strlen(buf)-1] = ' ';  /* replace trailing '\n' with space */
-    while (*buf && (*buf == ' ')) /* ignore leading spaces */
+    buf[strlen(buf)-1] = ' '; 
+    while (*buf && (*buf == ' ')) /* зайг алгасна*/
 	    buf++;
 
-    /* Build the argv list */
+    /* argv list үүсгэнэ */
     argc = 0;
     if (*buf == '\'') {
 	    buf++;
@@ -239,7 +251,7 @@ int parseline(const char *cmdline, char **argv)
 	    argv[argc++] = buf;
 	    *delim = '\0';
 	    buf = delim + 1;
-	    while (*buf && (*buf == ' ')) /* ignore spaces */
+	    while (*buf && (*buf == ' ')) /* Үай байвал алгасна */
 	       buf++;
 
 	    if (*buf == '\'') {
@@ -269,21 +281,21 @@ int parseline(const char *cmdline, char **argv)
  /*do_bgfg - г ажиллуулахад argv массив заавал шаардлагатай*/
 int builtin_cmd(char **argv) 
 {
-    if(!strcmp(argv[0], "quit")){ //quit комманд
-        /rintf("Quit\n");
+    if (!strcmp(argv[0], "quit")) {
         exit(0);
     }
-    if(!strcmp(argv[0], "jobs")){
-        listjobs(jobs);
+    else if (!strcmp("&", argv[0])){
         return 1;
     }
-    if(!strcmp(argv[0], "bg") || !strcmp(argv[0], "fg")){
-        do_bgfg(argv);
-        return 1;
-    }
-    if(!strcmp(argv[0], "&")){ //No signal
-        return 1;
-    }
+    else if (!strcmp("jobs", argv[0])) {  
+        listjobs(jobs);  
+        return 1;  
+    }  
+    else if (!strcmp("bg", argv[0]) || !(strcmp("fg", argv[0]))) {  
+        //call bgfg
+        do_bgfg(argv);  
+        return 1;  
+    }  
     return 0; //Builtin command биш байвал
 }
 
@@ -292,54 +304,60 @@ int builtin_cmd(char **argv)
  */
 void do_bgfg(char **argv) 
 {
-    struct job_t *jobp = NULL;
+    struct job_t *job;
+    char *tmp;
     int jid;
+    pid_t pid;
 
-    /*ямар ч аргумент байхгүй тохиолдолд коммандыг алгасах*/
-    if(argv[1] == NULL){
+    tmp = argv[1];
+    
+    // Хэрвээ id байхгүй бол
+    if(tmp == NULL) {
         printf("%s command requires PID or %%jobid argument\n", argv[0]);
         return;
     }
-
-    /*Parse - ээс PID эсвэл %JID-г шаарддаг*/
-    if(isdigit(argv[1][0])){
-        pid_t pid = atoi(argv[1]); /*atoi argv[1] - ийг тэмдэгт мөо болгон хөөрвүүлнэ*/
-        if(!(jobp = getjobpid(jobs, pid))){ /*process id- г нь олж үүнийг jobp - рүү хийнэ*/
-            printf("(%d): No such process\n", pid);
-            return;
+    
+    // Хэрвээ jid байх юм бол
+    if(tmp[0] == '%') {  
+        jid = atoi(&tmp[1]); 
+        //get job
+        job = getjobjid(jobs, jid);
+        if(job == NULL){  
+            printf("%s: No such job\n", tmp);  
+            return;  
+        }else{
+            
+            pid = job->pid;
         }
+    } 
+    // Хэрвээ pid байх юм бол
+    else if(isdigit(tmp[0])) { 
+        //get pid
+        pid = atoi(tmp); 
+        //get job 
+        job = getjobpid(jobs, pid); 
+        if(job == NULL){  
+            printf("(%d): No such process\n", pid);  
+            return;  
+        }  
+    }  
+    else {
+        printf("%s: argument must be a PID or %%jobid\n", argv[0]);
+        return;
     }
-    else if(argv[1][0] == '%'){
-        jid = atoi(&argv[1][1]);
-        if(!(jobp = getjobjid(jobs, jid))){
-            printf("%s: No such job\n", argv[1]);
-            return;
-        }
-    }
+    //kill
+    kill(-pid, SIGCONT);
+    
+    if(!strcmp("fg", argv[0])) {
+        //wait fg
+        job->state = FG;
+        waitfg(job->pid);
+    } 
     else{
-        printf("%s : argument must be a PID or jobid\n", argv[0]);
-        return ;
-    }
-
-    /*rest-ийг дуусгах хэрэгтэй байна.
-    Энэ цэг дээр jobp хувьсагч нь job pointer болно.
-    */
-    if(kill(-(jobp->pid), SIGCOUT) < 0){
-        if(errno != ESRCH){
-            unix_error("kill error");
-        }
-    }
-    if(!strcmp("fg", argv[0])){
-        jobp->state = FG;
-        waitfg(jobp->pid);
-    }
-    else if(!strcmp("bg", argv[0])){
-        //printf("[%d] (%d) %s", jobp->jid, jobp->pid, jobp->cmdline);
-        jobp->state = BG;
-    }
-    else{
-        printf("bg/bf error : %s\n",argv[0]);
-    }
+        //print bg
+        printf("[%d] (%d) %s", job->jid, job->pid, job->cmdline);
+        job->state = BG;
+    } 
 }
 
 /* 
@@ -347,8 +365,16 @@ void do_bgfg(char **argv)
  */
 void waitfg(pid_t pid)
 {
-    while(pid == fgpid(jobs)){ /*while process id нь foregroundед байхад ажиллана*/
-        sleep(1); /*procees id foreground-ээс гэрэх хүртэл хүлээнэ*/
+    struct job_t* job;
+    job = getjobpid(jobs,pid);
+    
+    if(pid == 0){
+        return;
+    }
+    if(job != NULL){
+        //sleep
+        while(pid==fgpid(jobs)){
+        }
     }
     return;
 }
@@ -366,31 +392,28 @@ void waitfg(pid_t pid)
  */
 void sigchld_handler(int sig) 
 {
-    int status;
-    pid_t pid; /*pid хэрэглэх бүтэц*/
-    /*-1 child process-ийг хүлээнэ.*/
-    /*WNOHANG : хүүхэд процэсс дууссан байхад утга буцаана.*/
-    /*хүүхэд зогссон тохиолдолд бас буцна.*/
-    while((pid = waitpid(-1, &status, WNOHANG | WUNTRACED)) > 0){
-        if(WIFEXID(status)){ /*child зөв ажиллаж байвал үүнийг шалгана.*/
+    int status;  
+    pid_t pid;  
+    
+    while ((pid = waitpid(fgpid(jobs), &status, WNOHANG|WUNTRACED)) > 0) {  
+        if (WIFSTOPPED(status)){ 
+            
+            getjobpid(jobs, pid)->state = ST;
+            int jid = pid2jid(pid);
+            printf("Job [%d] (%d) Stopped by signal %d\n", jid, pid, WSTOPSIG(status));
+        }  
+        else if (WIFSIGNALED(status)){
+            
+            int jid = pid2jid(pid);  
+            printf("Job [%d] (%d) terminated by signal %d\n", jid, pid, WTERMSIG(status));
             deletejob(jobs, pid);
-        }
-        else if(WIFSIGNALED(status)){ /*child ажиллаж байхдаа хэрвээ өмнө нь гараагүй байсан бол шалгана.*/
-            printf("Job [%d] (%d) terminated by signal %d\n", pid2jid(pid), pid, WTERMIG(status));
-            sigint_handler(-2); /*Энд signal_handler функц дуудагдана.*/
-        }
-        else if(WIFSTOPPED(status)){ /*хүүхдийн буцах шалтгаан болсон процесс мөн зогссон эсэхийг шалгана*/
-            sigtstp_handler(20);
-            printf("[%d] Stopped %s\n", pid2jid(pid), jobs->cmdline);
-        }
-    }
-
-    /*ECHILD гэдэг нь олдоогүй эсвэл тухайн процесс child-ийнх биш байх тохиолдол*/
-    /*strerror(errno) алдааны кодыг тэмдэгтээр илэрхийлнэ*/
-    if(pid < 0 && errno != ECHILD){
-        printf("waitpid error : %s\n", strerror(errno));
-    }
-    return ;
+        }  
+        else if (WIFEXITED(status)){  
+            //гарна
+            deletejob(jobs, pid);  
+        }  
+    }  
+    return;
 }
 
 /* 
@@ -412,18 +435,6 @@ void sigint_handler(int sig)
             deletejob(jobs, pid);
         }
     }
-    /*
-    pid_t pid = fgpid(jobs);
-    if(pid != 0){
-        kill(pid, STGTSTP);
-        job_t *job = getjobpid(jobs, pid);
-        Sio_puts("Job [");
-        Sio_putl(job->jid);
-        Sio_puts("] (");
-        Sio_putl(job->pid);
-        Sio_puts(") terminated by signal ");
-        Sio_putl
-    }*/
     return;
 }
 
@@ -661,3 +672,6 @@ void sigquit_handler(int sig)
     printf("Terminating after receipt of SIGQUIT signal\n");
     exit(1);
 }
+
+
+
