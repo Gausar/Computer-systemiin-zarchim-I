@@ -12,6 +12,10 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <errno.h>
+#include <stdbool.h>
+#include <fcntl.h>
+#include <wait.h>
+#include <error.h>
 
 /* Misc manifest constants */
 #define MAXLINE    1024   /* max line size */
@@ -97,6 +101,20 @@ int main(int argc, char **argv)
     /* Redirect stderr to stdout (so that driver will get all output
      * on the pipe connected to stdout) */
     dup2(1, 2);
+    int dividerIndex = -1;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "|")) {
+        dividerIndex = i;
+        argv[i] = NULL;
+        break;
+        }
+    }
+
+    if (dividerIndex == -1 || dividerIndex == 1 || dividerIndex == argc - 1) {
+        error(1, 0, "Invalid arguments; must specify 2 args arrays with | in between");
+    }
+
+    launchPipedExecutables(argv + 1, argv + dividerIndex + 1);
 
     /* Parse the command line */
     while ((c = getopt(argc, argv, "hvp")) != EOF) {
@@ -151,7 +169,85 @@ int main(int argc, char **argv)
 
     exit(0); /* control never reaches here */
 }
-  
+/*main функцийн дараа pipe(|), input direction хоёрын кодыг нэмсэн.*/
+
+void pipeline(char *argv1[], char *argv2[], pid_t pids[]) {
+    int fds[2];
+    pipe(fds);
+
+    pids[0] = fork();
+    if (pids[0] == 0) {
+        close(fds[0]);
+        dup2(fds[1], STDOUT_FILENO);
+        close(fds[1]);
+        execvp(argv1[0], argv1);
+    }
+
+    close(fds[1]);
+
+    pids[1] = fork();  
+    if (pids[1] == 0) {
+
+        dup2(fds[0], STDIN_FILENO);
+        close(fds[0]);
+        execvp(argv2[0], argv2);
+    }
+
+    close(fds[0]);
+}
+void pipeline2(char *argv1[], char *argv2[], pid_t pids[]) {
+    int fds[2];
+    pipe2(fds, O_CLOEXEC);
+
+    pids[0] = fork();
+    if (pids[0] == 0) {
+        dup2(fds[1], STDOUT_FILENO);
+        execvp(argv1[0], argv1);
+    }
+
+    close(fds[1]);
+
+    pids[1] = fork();
+    if (pids[1] == 0) {
+
+        dup2(fds[0], STDIN_FILENO);
+        execvp(argv2[0], argv2);
+    }
+
+    close(fds[0]);
+}
+static void printArgumentVector(char *argv[]) {
+    if (argv == NULL || *argv == NULL) {
+        printf("<empty>");
+        return;
+    }
+    
+    while (true) {
+        printf("%s", *argv);
+        argv++;
+        if (*argv == NULL) return;
+        printf(" ");
+    }
+}
+
+static void summarizePipeline(char *argv1[], char *argv2[]) {
+    printf("Pipeline: ");
+    printArgumentVector(argv1);
+    printf(" -> ");
+    printArgumentVector(argv2);
+    printf("\n");
+}
+
+static void launchPipedExecutables(char *argv1[], char *argv2[]) {
+    summarizePipeline(argv1, argv2);
+    pid_t pids[2];
+    pipeline(argv1, argv2, pids);
+    // pipeline2(argv1, argv2, pids);  
+    waitpid(pids[0], NULL, 0);
+    waitpid(pids[1], NULL, 0);
+}
+
+
 /* 
  * eval - Evaluate the command line that the user has just typed in
  * 

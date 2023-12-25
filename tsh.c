@@ -1,6 +1,4 @@
 /* 
- * tsh - A tiny shell program with job control
- * 
  * <Gausar Amangyeldi 21b1num1182>
  */
 #include <stdio.h>
